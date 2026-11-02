@@ -67,18 +67,39 @@ public class PaperweightFaweWorldNativeAccess implements WorldNativeAccess<Level
 
     /**
      * Folia - region threading: there is no global {@code MinecraftServer.currentTick} on Folia.
-     * Each ticking region maintains its own tick counter, reachable through the regionised world
-     * data for the level. Off-region (e.g. from an async FAWE worker) that data is absent, so fall
-     * back to 0; callers only use this to detect that a tick has elapsed between two writes, and a
-     * constant value simply means "do not force a flush on tick boundaries", which is the safe
-     * behaviour when we are not on a region thread.
+     * Each ticking region keeps its own counter, reachable through the regionised world data.
+     *
+     * <p>Verified against Folia 26.1.2: {@code Level#getCurrentWorldData()} is not a plain getter —
+     * it returns the current thread's region data and <b>throws</b> if that region belongs to a
+     * different world:</p>
+     *
+     * <pre>
+     *   if (world != this) {
+     *       throw new IllegalStateException("World mismatch: expected ... but got ...");
+     *   }
+     * </pre>
+     *
+     * <p>That matters here because {@code Level} is not always the ticking world: {@code //regen}
+     * builds a detached temporary world ({@code faweregentempworld}) and wraps it, while the thread
+     * is actually ticking the real world. Asking the temp world for the current region data throws.
+     * Off-region (an async FAWE worker) it returns null instead.</p>
+     *
+     * <p>So a failure to obtain the tick is expected and must degrade to 0: callers only use this to
+     * decide whether a tick elapsed between two writes, and a constant value means "do not force a
+     * flush on tick boundaries" — the safe behaviour when this level is not the one being ticked.</p>
      */
     private int currentTick() {
-        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = getLevel().getCurrentWorldData();
-        if (worldData == null || worldData.regionData == null) {
+        try {
+            final io.papermc.paper.threadedregions.RegionizedWorldData worldData = getLevel().getCurrentWorldData();
+            if (worldData == null || worldData.regionData == null) {
+                return 0;
+            }
+            return (int) worldData.regionData.getCurrentTick();
+        } catch (final IllegalStateException worldMismatch) {
+            // This level is not the world currently ticking on this thread (e.g. the regen temp
+            // world). There is no meaningful region tick to read.
             return 0;
         }
-        return (int) worldData.regionData.getCurrentTick();
     }
 
 

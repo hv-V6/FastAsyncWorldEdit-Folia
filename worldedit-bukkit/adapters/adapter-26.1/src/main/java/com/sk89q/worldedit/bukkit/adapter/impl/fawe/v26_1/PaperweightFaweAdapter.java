@@ -544,6 +544,41 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
         return CraftItemStack.asCraftMirror(stack);
     }
 
+    /**
+     * The regionised world data for {@code serverLevel}, or {@code null} when that level is not the
+     * world currently ticking on this thread.
+     *
+     * <p>Folia's {@code Level#getCurrentWorldData()} is not a simple getter: it returns the calling
+     * thread's region data and throws {@code IllegalStateException("World mismatch: ...")} if that
+     * region belongs to a different world. That happens in normal operation — {@code //regen} builds
+     * a detached temporary world and wraps it while the thread is ticking the real world.</p>
+     *
+     * <p>Capture state is only meaningful for the level actually being ticked, so a mismatch is
+     * treated as "no capture state available" rather than an error.</p>
+     */
+    @javax.annotation.Nullable
+    private static io.papermc.paper.threadedregions.RegionizedWorldData regionDataOrNull(final ServerLevel serverLevel) {
+        try {
+            return serverLevel.getCurrentWorldData();
+        } catch (final IllegalStateException worldMismatch) {
+            return null;
+        }
+    }
+
+    /**
+     * Captured block states for the region currently ticking {@code serverLevel}, or an empty
+     * collection when that level is not the world being ticked (see {@link #regionDataOrNull}).
+     */
+    private static java.util.Collection<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates(
+            final ServerLevel serverLevel
+    ) {
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = regionDataOrNull(serverLevel);
+        if (worldData == null) {
+            return List.of();
+        }
+        return worldData.capturedBlockStates.values();
+    }
+
     @Override
     protected void preCaptureStates(final ServerLevel serverLevel) {
         // Folia - region threading: capture state is per-REGION, not per-level. Folia replaced the
@@ -551,7 +586,10 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
         // Callers must be on the region that owns the chunks being written; otherwise the capture
         // flags would be set on another region's data and blocks written by the target region would
         // not be recorded for the block-state list.
-        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = serverLevel.getCurrentWorldData();
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = regionDataOrNull(serverLevel);
+        if (worldData == null) {
+            return;
+        }
         worldData.captureTreeGeneration = true;
         worldData.captureBlockStates = true;
     }
@@ -559,13 +597,20 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
     @Override
     protected List<org.bukkit.block.BlockState> getCapturedBlockStatesCopy(final ServerLevel serverLevel) {
         // Folia - region threading: read the current region's capture map.
-        return new ArrayList<>(serverLevel.getCurrentWorldData().capturedBlockStates.values());
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = regionDataOrNull(serverLevel);
+        if (worldData == null) {
+            return List.of();
+        }
+        return new ArrayList<>(worldData.capturedBlockStates.values());
     }
 
     @Override
     protected void postCaptureBlockStates(final ServerLevel serverLevel) {
         // Folia - region threading: reset and drain the current region's capture state.
-        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = serverLevel.getCurrentWorldData();
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = regionDataOrNull(serverLevel);
+        if (worldData == null) {
+            return;
+        }
         worldData.captureBlockStates = false;
         worldData.captureTreeGeneration = false;
         worldData.capturedBlockStates.clear();
@@ -594,7 +639,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
                     return null;
                 }
                 List<CraftBlockState> placedBlocks = new ArrayList<>(populator.getSnapshotBlocks());
-                placedBlocks.addAll(serverLevel.getCurrentWorldData().capturedBlockStates.values()); // Folia - region threading
+                placedBlocks.addAll(capturedBlockStates(serverLevel));
                 return placedBlocks;
             } finally {
                 postCaptureBlockStates(serverLevel);
@@ -662,7 +707,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
                             ), chunkPosx
                     ));
                     List<CraftBlockState> placedBlocks = new ArrayList<>(populator.getSnapshotBlocks());
-                    placedBlocks.addAll(serverLevel.getCurrentWorldData().capturedBlockStates.values()); // Folia - region threading
+                    placedBlocks.addAll(capturedBlockStates(serverLevel));
                     return placedBlocks;
                 }
             } finally {
@@ -701,7 +746,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
                     return null;
                 }
                 List<CraftBlockState> placedBlocks = new ArrayList<>(populator.getSnapshotBlocks());
-                placedBlocks.addAll(serverLevel.getCurrentWorldData().capturedBlockStates.values()); // Folia - region threading
+                placedBlocks.addAll(capturedBlockStates(serverLevel));
                 return placedBlocks;
             } finally {
                 postCaptureBlockStates(serverLevel);

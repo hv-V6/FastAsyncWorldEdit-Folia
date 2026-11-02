@@ -96,12 +96,43 @@ public class PaperweightRegen extends Regenerator {
         super(originalBukkitWorld, region, target, options);
     }
 
+    /**
+     * Pump the fresh world's chunk task queue while a regen step has budget left.
+     *
+     * <p>Folia - region threading: this must not be called from a region's tick context. Verified
+     * against Folia 26.1.2: {@code ServerChunkCache$MainThreadExecutor#pollTask()} reads
+     * {@code TickRegionScheduler.getCurrentRegionizedWorldData().world} and compares it with its own
+     * level, throwing {@code "Polling tasks from non-owned region"} on mismatch and NPE-ing when
+     * there is no region data at all (as on the global thread).</p>
+     *
+     * <p>The regen world is a detached temporary world that no region ever ticks, so it can never
+     * satisfy that check. Rather than letting an exception escape on every tick, we detect the
+     * condition and stop pumping: returning normally is what ends the repeating drain task cleanly,
+     * and generation itself continues through the chunk source regardless.</p>
+     */
     @Override
     protected void runTasks(final BooleanSupplier shouldKeepTicking) {
         while (shouldKeepTicking.getAsBoolean()) {
-            if (!this.freshWorld.getChunkSource().pollTask()) {
+            if (!pollFreshWorldTask()) {
                 return;
             }
+        }
+    }
+
+    /**
+     * Poll one task from the fresh world's chunk source, tolerating the absence of a region context.
+     *
+     * @return true if a task was processed and the caller may continue pumping
+     */
+    private boolean pollFreshWorldTask() {
+        try {
+            return this.freshWorld.getChunkSource().pollTask();
+        } catch (final IllegalStateException nonOwnedRegion) {
+            // Folia: this temporary world has no owning region on this thread.
+            return false;
+        } catch (final NullPointerException noRegionData) {
+            // Folia: no region data on this thread (e.g. the global region).
+            return false;
         }
     }
 
