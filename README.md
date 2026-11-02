@@ -1,4 +1,17 @@
 # FastAsyncWorldEdit
+
+> ## 🍃 This is a Folia fork
+>
+> This fork ports FAWE to **[Folia](https://github.com/PaperMC/Folia) stable 26.1.2**, which replaces
+> Paper's single tick loop with independently ticking *regions*, each owned by one thread at a time.
+>
+> - **Read [FOLIA-FORK.md](FOLIA-FORK.md)** for everything that changed and the reasoning behind it.
+> - Targets **Folia only** — the built JAR will not run on Paper or Spigot.
+> - Requires **JDK 25**: `./gradlew :worldedit-bukkit:shadowJar`
+> - Verification harness: [fawetest/](fawetest/)
+>
+> Upstream documentation follows, unchanged.
+
 [![Join us on Discord](https://img.shields.io/discord/268444645527126017.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/intellectualsites)
 [![bStats Servers](https://img.shields.io/bstats/servers/1403)](https://bstats.org/plugin/bukkit/FastAsyncWorldEdit/1403)
 [![Crowdin](https://badges.crowdin.net/e/4a5819fae3fd88234a8ea13bfbb072bb/localized.svg)](https://intellectualsites.crowdin.com/fastasyncworldedit)
