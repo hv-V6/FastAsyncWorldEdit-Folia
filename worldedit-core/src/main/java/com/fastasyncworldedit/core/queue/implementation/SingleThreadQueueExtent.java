@@ -262,14 +262,23 @@ public class SingleThreadQueueExtent extends ExtentBatchProcessorHolder implemen
         // Folia: only if this thread owns the region containing this chunk. The crucial point is
         // that we must NOT submit this chunk to the shared blocking executor just because we are
         // not the "main" thread — on Folia the calling thread may be the region owner, and the
-        // chunk MUST be applied here, because:
-        //   * applying it elsewhere is a cross-region write (illegal), and
-        //   * if a region thread blocks in flush() waiting for work that only it can legally do,
-        //     the region deadlocks and Folia's watchdog kills the tick.
+        // chunk MUST be applied here, because applying it elsewhere is a cross-region write.
         //
-        // So we test region ownership for this specific chunk rather than the old global thread
-        // check. `isRegionOwner` degrades to `isMainThread()` on non-Folia platforms.
-        if (Fawe.isRegionOwner(world, chunk.getX(), chunk.getZ())) {
+        // The second condition is the up-front routing fix: applying a chunk requires it to be
+        // loaded, and triggering a *load* from a tick thread parks that thread inside the server's
+        // synchronous chunk load, so the region cannot tick and the watchdog kills it. Touching an
+        // already-loaded chunk never blocks, so we only take the inline path when the chunk is
+        // already loaded. Otherwise the whole apply is deferred off-tick (where blocking is legal)
+        // and then bounced back to the owning region.
+        final boolean ownsRegion = Fawe.isRegionOwner(world, chunk.getX(), chunk.getZ());
+        if (ownsRegion) {
+            final boolean loaded = com.fastasyncworldedit.core.util.TaskManager.taskManager()
+                    .isChunkLoaded(world, chunk.getX(), chunk.getZ());
+            if (!loaded && com.fastasyncworldedit.core.util.TaskManager.taskManager().isTickThread()) {
+                // Would have been an inline apply, but the chunk still needs loading. Defer the
+                // entire apply off-tick rather than stall this region waiting for the load.
+                return (V) submitOffTickThenOnRegion(chunk, world);
+            }
             V result = (V) chunk.call();
             if (result == null) {
                 return (V) (Future) Futures.immediateFuture(null);
@@ -282,6 +291,48 @@ public class SingleThreadQueueExtent extends ExtentBatchProcessorHolder implemen
         // that makes an edit spanning several Folia regions correct — each chunk is applied by the
         // only thread permitted to touch it, rather than being written off-region by a shared pool.
         return (V) Fawe.instance().getQueueHandler().submit(chunk, world);
+    }
+
+    /**
+     * Apply a chunk that our region owns but which is not loaded yet, without stalling the region.
+     *
+     * <p>This is the up-front routing path. A tick thread must not block on a chunk load, so:</p>
+     *
+     * <ol>
+     *     <li>the chunk is <em>loaded</em> off-tick, where both blocking and asynchronous chunk
+     *     loads are legal; then</li>
+     *     <li>the actual write is handed back to the <em>owning region</em>, because writing chunk
+     *     data from any other thread is a cross-region write.</li>
+     * </ol>
+     *
+     * <p>Critically, the load and the write are separated: performing {@code chunk.call()} directly
+     * on the async thread would apply a cross-region write, which is exactly what this port must
+     * never do.</p>
+     *
+     * @return future completed once the owning region has applied the chunk
+     */
+    private <V extends Future<V>> Future<V> submitOffTickThenOnRegion(final IQueueChunk chunk, final World world) {
+        final java.util.concurrent.CompletableFuture<V> done = new java.util.concurrent.CompletableFuture<>();
+        final com.fastasyncworldedit.core.util.TaskManager tasks = com.fastasyncworldedit.core.util.TaskManager.taskManager();
+        final int chunkX = chunk.getX();
+        final int chunkZ = chunk.getZ();
+
+        tasks.async(() -> {
+            // 1. Off-tick: make sure the chunk exists so the region-side write cannot trigger a load.
+            tasks.loadChunk(world, chunkX, chunkZ);
+
+            // 2. Back on the owning region: perform the write.
+            tasks.regionTask(world, chunkX, chunkZ, () -> {
+                try {
+                    chunk.call();
+                    done.complete(null);
+                } catch (final Throwable t) {
+                    done.completeExceptionally(t);
+                }
+            });
+        });
+
+        return done;
     }
 
     @Override

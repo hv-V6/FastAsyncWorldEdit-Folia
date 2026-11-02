@@ -269,6 +269,67 @@ public abstract class TaskManager {
     }
 
     /**
+     * Whether the calling thread is a server tick thread, i.e. a thread that must never block.
+     *
+     * @return true if the calling thread is a tick thread
+     */
+    public boolean isTickThread() {
+        return Fawe.isMainThread();
+    }
+
+    /**
+     * Whether the chunk is loaded right now, and can therefore be touched without triggering a load.
+     *
+     * <p>This is the discriminator that makes up-front routing possible on Folia. Reading or writing
+     * an already-loaded chunk from the region thread that owns it never blocks. Triggering a
+     * <em>load</em> from a tick thread does: it parks the thread inside the server's synchronous
+     * chunk load, so the region cannot tick and the watchdog eventually kills it.</p>
+     *
+     * <p>So before applying an edit on a tick thread, callers check this for the chunks involved.
+     * If they are all loaded the apply can proceed inline; otherwise it has to be deferred off-tick
+     * where blocking is legal.</p>
+     *
+     * @param world  target world
+     * @param chunkX chunk X coordinate
+     * @param chunkZ chunk Z coordinate
+     * @return true if the chunk is currently loaded
+     */
+    public boolean isChunkLoaded(
+            @Nullable final com.sk89q.worldedit.world.World world,
+            final int chunkX,
+            final int chunkZ
+    ) {
+        // Single-threaded platforms cannot deadlock on a load, so treat every chunk as loadable.
+        return true;
+    }
+
+    /**
+     * Ensure a chunk is loaded, blocking until it is.
+     *
+     * <p><b>Off-tick only.</b> On Folia the load is performed through the server's asynchronous
+     * chunk API; the caller must not be a region tick thread, because blocking a region on a load it
+     * could itself complete is what stalls the region.</p>
+     *
+     * <p>Used by the up-front routing path: an edit that needs unloaded terrain is moved off-tick,
+     * its chunks are loaded here, and the apply is then delivered to the owning region where it can
+     * run without triggering a load.</p>
+     *
+     * @param world  target world
+     * @param chunkX chunk X coordinate
+     * @param chunkZ chunk Z coordinate
+     * @return true if the chunk is loaded
+     */
+    public boolean loadChunk(
+            @Nullable final com.sk89q.worldedit.world.World world,
+            final int chunkX,
+            final int chunkZ
+    ) {
+        // Single-threaded platforms: a synchronous load is safe from the server thread.
+        return true;
+    }
+
+
+    /**
      * Run a task on the thread that owns the region containing the given chunk.
      *
      * <p>If the caller already owns that region the task runs inline; otherwise it is queued to the

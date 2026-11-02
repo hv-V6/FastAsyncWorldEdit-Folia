@@ -164,6 +164,47 @@ public class BukkitTaskManager extends TaskManager {
     }
 
     @Override
+    public boolean isChunkLoaded(@Nullable final World world, final int chunkX, final int chunkZ) {
+        if (!FoliaSupport.isFolia()) {
+            return true;
+        }
+        final org.bukkit.World bukkitWorld = toBukkit(world);
+        if (bukkitWorld == null) {
+            return false;
+        }
+        try {
+            return bukkitWorld.isChunkLoaded(chunkX, chunkZ);
+        } catch (final Throwable ignored) {
+            // The world may have unloaded between the lookup and the check.
+            return false;
+        }
+    }
+
+    @Override
+    public boolean loadChunk(@Nullable final World world, final int chunkX, final int chunkZ) {
+        if (!FoliaSupport.isFolia()) {
+            return true;
+        }
+        final org.bukkit.World bukkitWorld = toBukkit(world);
+        if (bukkitWorld == null) {
+            return false;
+        }
+        if (isChunkLoaded(world, chunkX, chunkZ)) {
+            return true;
+        }
+        try {
+            // Off-tick only (enforced by the caller). Folia supports async chunk loads here; the
+            // join is safe because a non-tick thread has no region tick to stall.
+            bukkitWorld.getChunkAtAsync(chunkX, chunkZ, true).join();
+            return bukkitWorld.isChunkLoaded(chunkX, chunkZ);
+        } catch (final Throwable t) {
+            LOGGER.warn("Could not pre-load chunk {},{} in {}: {}", chunkX, chunkZ,
+                    bukkitWorld.getName(), t.toString());
+            return false;
+        }
+    }
+
+    @Override
     public void regionTask(@Nullable final World world, final int chunkX, final int chunkZ, @Nonnull final Runnable runnable) {
         if (!FoliaSupport.isFolia()) {
             task(runnable);
