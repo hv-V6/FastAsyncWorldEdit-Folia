@@ -295,15 +295,56 @@ PASS concurrent multi-region: applied=2/2 failures=0 in 13602ms   (two 20x20-chu
 
 Zero ERROR lines, zero watchdog tick kills.
 
+### Up-front routing for unloaded chunks (the stall fix)
+
+The remaining stall was edits started on a region thread over **unloaded** terrain. Measured: a
+40x40-chunk fill from a tick thread took 16s and produced three watchdog events.
+
+The discriminator is *loaded vs unloaded*, not *own region vs foreign*:
+
+- Touching an **already-loaded** chunk from its owning region thread never blocks.
+- Triggering a **load** from a tick thread parks it in `syncLoad` → `managedBlock`, so the region
+  cannot tick, the load never completes, and the watchdog kills the region.
+
+`SingleThreadQueueExtent` now decides **before** applying: if we own the region and the chunk is
+loaded, apply inline (unchanged). If the chunk is not loaded and we are on a tick thread, defer:
+
+1. off-tick, load the chunk (blocking and async loads are both legal there);
+2. hand the **write** back to the owning region — writing chunk data from any other thread would be a
+   cross-region write, so load and write are deliberately separate steps.
+
+Result: `tick-foreign` now completes in **230ms** instead of 16s, with the blocks still landing 5/5.
+
+**Negative result worth recording:** I first tried rejecting the load with an exception at the load
+site. That was wrong — it aborted `basic`, `copy-paste` and `distant-region`, which legitimately
+relied on loading. It traded working edits for zero stalls and was reverted. The lesson is that this
+had to be solved by routing *before* the apply, not by guarding the load.
+
+### Verified at runtime (Folia 26.1.2-DEV-HEAD@62dc0f2, Java 25)
+
+```
+PASS basic:                  single=STONE bulk=GOLD_BLOCK
+PASS copy-paste:             src=EMERALD_BLOCK dst=EMERALD_BLOCK dstCorner=EMERALD_BLOCK
+PASS distant-region:         type=REDSTONE_BLOCK ownedByThisThread=true
+PASS multi-region:           7/7 sampled chunks applied
+PASS concurrent multi-region: applied=2/2 failures=0      (two 20x20-chunk edits at once)
+PASS tick-foreign:           completed in 230ms           (tick-thread edit over unloaded terrain)
+PASS tick-foreign-applied:   5/5 sampled chunks written
+```
+
+Zero ERROR lines, zero watchdog tick kills.
+
 ### Still to verify
 - `//undo` / `//redo` through a real player actor (needs a connected client; history is recorded, replay path unproven).
 - Brushes, `//schem load/save`, `//regen`, `//paste -a`.
 - Graceful degradation of WorldGuard / PlotSquared / Towny / GriefPrevention (none support Folia).
 
 ### Known remaining risk
-- A tick-thread bulk edit that needs foreign chunks will still stall the region (see the correction
-  above). The fix is architectural: route such edits through the async path before starting.
-- `//regen` will need the same off-tick treatment.
+- `//regen` will need the same off-tick treatment (it regenerates chunks, so it inherently loads).
+- The deferred path completes asynchronously, so a tick-thread caller returns before its
+  unloaded-terrain partitions are written. Block placement is still correct and ordered per chunk;
+  only the "everything is on disk" completion point moves later.
+
 
 
 
