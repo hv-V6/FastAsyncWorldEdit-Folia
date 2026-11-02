@@ -320,6 +320,27 @@ site. That was wrong — it aborted `basic`, `copy-paste` and `distant-region`, 
 relied on loading. It traded working edits for zero stalls and was reverted. The lesson is that this
 had to be solved by routing *before* the apply, not by guarding the load.
 
+### `//regen`
+
+Regen builds a detached temporary world (`faweregentempworld`) and pumps its chunk task queue while
+copying generated blocks into the real world. Two Folia API differences broke it:
+
+1. **`Level#getCurrentWorldData()` is not a getter.** It returns the calling thread's region data and
+   **throws** on a mismatch:
+
+   ```java
+   if (world != this) throw new IllegalStateException("World mismatch: ...");
+   ```
+
+   Regen wraps the temp world while the thread ticks the real one, so the region-tick read threw and
+   regen failed in 88ms. Capture-state access had the same problem. Both now tolerate a mismatch: an
+   unavailable tick degrades to 0 (meaning "no tick-boundary flush") and capture state reads empty.
+
+2. **`ServerChunkCache$MainThreadExecutor#pollTask()` requires region ownership** —
+   `getCurrentRegionizedWorldData().world == this.world`. The regen world is never ticked by a region,
+   so a tick thread got `"Polling tasks from non-owned region"` and the global thread NPE'd every
+   tick. `runTasks` now detects both and stops pumping instead of throwing each tick.
+
 ### Verified at runtime (Folia 26.1.2-DEV-HEAD@62dc0f2, Java 25)
 
 ```
@@ -330,20 +351,25 @@ PASS multi-region:           7/7 sampled chunks applied
 PASS concurrent multi-region: applied=2/2 failures=0      (two 20x20-chunk edits at once)
 PASS tick-foreign:           completed in 230ms           (tick-thread edit over unloaded terrain)
 PASS tick-foreign-applied:   5/5 sampled chunks written
+PASS regen:                  returned=true in 3736ms
+PASS regen-applied:          5/5 sampled blocks replaced by generated terrain
 ```
 
-Zero ERROR lines, zero watchdog tick kills.
+Zero ERROR lines, zero watchdog tick kills, zero NPEs.
+
+`regen-applied` marks the region with bedrock first and confirms it is gone afterwards, so it
+verifies blocks were written rather than merely that the call returned true.
 
 ### Still to verify
 - `//undo` / `//redo` through a real player actor (needs a connected client; history is recorded, replay path unproven).
-- Brushes, `//schem load/save`, `//regen`, `//paste -a`.
+- Brushes, `//schem load/save`, `//paste -a`.
 - Graceful degradation of WorldGuard / PlotSquared / Towny / GriefPrevention (none support Folia).
 
 ### Known remaining risk
-- `//regen` will need the same off-tick treatment (it regenerates chunks, so it inherently loads).
-- The deferred path completes asynchronously, so a tick-thread caller returns before its
+- The deferred routing path completes asynchronously, so a tick-thread caller returns before its
   unloaded-terrain partitions are written. Block placement is still correct and ordered per chunk;
   only the "everything is on disk" completion point moves later.
+
 
 
 
