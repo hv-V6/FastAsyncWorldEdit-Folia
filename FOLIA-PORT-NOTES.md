@@ -196,6 +196,54 @@ PASS distant-region: type=REDSTONE_BLOCK ownedByThisThread=true   (chunk 320,320
 
 Zero ERROR lines, zero watchdog tick kills, no cross-region access exceptions.
 
+### Multi-region edit partitioning
+
+An edit routinely spans many chunks, and with Folia's default
+`threaded-regions.grid-exponent: 4` a region covers 16x16 chunks — so a wide edit crosses region
+boundaries and each chunk may only be written by the thread owning its region.
+
+Three defects blocked this, all found by running a 24x24-chunk fill on a live server:
+
+1. **`isTickThread()` was wrong.** It resolved `TickThread.isTickThread()` reflectively, the lookup
+   failed silently, and it fell back to `isGlobalTickThread()` — false on ordinary region threads, so
+   every region thread looked off-thread. Decompiling Folia's `CraftServer` showed
+   `isPrimaryThread()` *is* `TickThread.isTickThread()` on Folia. Using that public API removed the
+   reflection hazard and made the predicate correct.
+
+2. **`ParallelQueueExtent.apply` forked to FAWE's own pool and joined.** Those pool threads do not
+   own the chunks' regions (cross-region write) and the join parked a region thread (watchdog kill).
+   On a tick thread it now takes the sequential path and lets the queue route each chunk to its owning
+   region. The parallelism that matters on Folia is *between* regions, which already run concurrently.
+
+3. **`QueueHandler#submit` had no world context**, so partitioned chunks went to the blocking pool,
+   which then wrote `LevelChunk` off-region. It now takes the world and dispatches each chunk to its
+   owning region via `regionFuture`.
+
+Joining is now policy-driven: an off-tick thread blocks until every partition is applied; a tick
+thread drains only completed partitions and never parks on foreign region work.
+
+### A crucial operational finding
+
+A region thread **cannot** perform a multi-region edit that needs to load foreign chunks:
+`ServerChunkCache.syncLoad` blocks in `BlockableEventLoop.managedBlock`, which requires the owning
+region to make progress, and the region stalls until the watchdog fires. Multi-region edits must be
+driven from an **off-tick** thread (e.g. `AsyncScheduler`), where Folia permits async chunk loads and
+blocking. Region threads are fine for edits wholly inside their own region.
+
+### Verified at runtime (Folia 26.1.2-DEV-HEAD@62dc0f2, Java 25)
+
+Harness plugin schedules each scenario on the region owning its chunks; the multi-region case is
+driven from the async scheduler as described above.
+
+```
+PASS basic:          single=STONE bulk=GOLD_BLOCK
+PASS copy-paste:     src=EMERALD_BLOCK dst=EMERALD_BLOCK dstCorner=EMERALD_BLOCK
+PASS distant-region: type=REDSTONE_BLOCK ownedByThisThread=true   (chunk 320,320)
+PASS multi-region:   7/7 sampled chunks applied (write took 5791ms)  (~24x24 chunks, async)
+```
+
+Zero ERROR lines, zero watchdog tick kills.
+
 ### Still to verify
 - `//undo` / `//redo` through a real player actor (needs a connected client; history is recorded, replay path unproven).
 - Brushes, `//schem load/save`, `//regen`, `//paste -a`.
@@ -203,9 +251,10 @@ Zero ERROR lines, zero watchdog tick kills, no cross-region access exceptions.
 - Graceful degradation of WorldGuard / PlotSquared / Towny / GriefPrevention (none support Folia).
 
 ### Known remaining risk
-An edit whose region spans multiple Folia regions still needs partitioning by owning region. The current fix
-makes single-region edits correct and prevents cross-region deadlocks; multi-region partitioning is the next
-substantial piece.
+- Region-thread bulk edits that must load foreign chunks will stall the region. FAWE should detect
+  this and route the whole edit through the async path rather than discovering it at `syncLoad`.
+- `//regen` will need the same off-tick treatment.
+
 
 ## 7. Historical analysis (pre-port)
 
