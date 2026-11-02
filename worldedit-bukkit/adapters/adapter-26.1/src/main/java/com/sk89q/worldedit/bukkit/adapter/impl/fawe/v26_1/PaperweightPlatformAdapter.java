@@ -262,19 +262,45 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
         if (levelChunk != null) {
             return CompletableFuture.completedFuture(levelChunk);
         }
+
+        // Folia - region threading.
+        //
+        // On Folia a chunk can only be loaded by the thread that owns its region. Calling the async
+        // chunk API and then blocking on the result, as upstream does, deadlocks whenever the caller
+        // is itself the owning region thread: the load is queued to that same thread, which is
+        // parked waiting for it. Folia's watchdog then kills the tick.
+        //
+        // The synchronous load path is correct here *because* we are on the owning region thread.
+        // When we are not, we must not load at all - callers should hop to the region first (see
+        // TaskManager#regionTask). Returning a failed future makes that contract explicit instead of
+        // hanging the server.
+        if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverLevel, chunkX, chunkZ)) {
+            try {
+                // getChunk performs a synchronous load/generate and is legal on the owning region.
+                final LevelChunk loaded = serverLevel.getChunk(chunkX, chunkZ);
+                addTicket(serverLevel, chunkX, chunkZ);
+                return CompletableFuture.completedFuture(loaded);
+            } catch (final Throwable t) {
+                LOGGER.error("Could not synchronously load chunk at {},{}", chunkX, chunkZ, t);
+                final CompletableFuture<LevelChunk> failed = new CompletableFuture<>();
+                failed.completeExceptionally(t);
+                return failed;
+            }
+        }
+
         if (PaperSupport.isPaper()) {
             CompletableFuture<LevelChunk> future = serverLevel
-                .getWorld()
-                .getChunkAtAsync(chunkX, chunkZ, true, true)
-                .thenApply(chunk -> {
-                    addTicket(serverLevel, chunkX, chunkZ);
-                    try {
-                        return toLevelChunk(chunk);
-                    } catch (Throwable e) {
-                        LOGGER.error("Could not asynchronously load chunk at {},{}", chunkX, chunkZ, e);
-                        return null;
-                    }
-                });
+                    .getWorld()
+                    .getChunkAtAsync(chunkX, chunkZ, true, true)
+                    .thenApply(chunk -> {
+                        addTicket(serverLevel, chunkX, chunkZ);
+                        try {
+                            return toLevelChunk(chunk);
+                        } catch (Throwable e) {
+                            LOGGER.error("Could not asynchronously load chunk at {},{}", chunkX, chunkZ, e);
+                            return null;
+                        }
+                    });
             try {
                 if (!future.isCompletedExceptionally() || (future.isDone() && future.get() != null)) {
                     return future;
@@ -303,7 +329,8 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
             if (nmsChunk != null) {
                 return nmsChunk;
             }
-            if (Fawe.isMainThread()) {
+            // Folia - region threading: only the owning region may load synchronously.
+            if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverLevel, chunkX, chunkZ)) {
                 return serverLevel.getChunk(chunkX, chunkZ);
             }
             return null;
@@ -319,18 +346,48 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
                 return nmsChunk;
             }
             // Avoid "async" methods from the main thread.
-            if (Fawe.isMainThread()) {
+            //
+            // Folia - region threading: the inline synchronous load is legal only from the thread
+            // that owns this chunk's region, which is what isRegionOwner tests. Using isMainThread()
+            // here would be wrong twice over: it is false on region threads (so we would needlessly
+            // return null and let the caller queue async work that can deadlock), and on Folia it is
+            // true for the global region thread, which must NOT load an ordinary chunk.
+            if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverLevel, chunkX, chunkZ)) {
                 return serverLevel.getChunk(chunkX, chunkZ);
             }
             return null;
         }
     }
 
+    /**
+     * Keep a chunk loaded by adding a ticket to it.
+     *
+     * <p>Upstream sends this through {@code MCUtil.MAIN_EXECUTOR}. That is wrong on Folia: verified
+     * against the Folia 26.1.2 server, {@code MAIN_EXECUTOR} there is
+     * {@code isMainThread() ? run : MinecraftServer.getServer().execute(run)}, i.e. it always hops to
+     * the <b>global</b> region. The global region owns no ordinary chunks, so issuing a ticket for a
+     * chunk owned by another region is a cross-region access; worse, callers that then block waiting
+     * for the chunk (see {@code ensureLoaded}) deadlock, because the global thread cannot progress
+     * the owning region while that region thread is parked waiting on it.</p>
+     *
+     * <p>The correct behaviour is to run the ticket operation on the thread that owns the chunk. If
+     * we are already on it, this executes inline and the subsequent load completes on this thread.</p>
+     */
     private static void addTicket(ServerLevel serverLevel, int chunkX, int chunkZ) {
-        // Ensure chunk is definitely loaded before applying a ticket
-        io.papermc.paper.util.MCUtil.MAIN_EXECUTOR.execute(() -> serverLevel
+        final Runnable addTicket = () -> serverLevel
                 .getChunkSource()
-                .addTicketWithRadius(ChunkHolderManager.UNLOAD_COOLDOWN, new ChunkPos(chunkX, chunkZ), 0));
+                .addTicketWithRadius(ChunkHolderManager.UNLOAD_COOLDOWN, new ChunkPos(chunkX, chunkZ), 0);
+
+        // Fast path: already the owning region, so do it now. This also avoids a needless task and,
+        // critically, keeps the chunk load progressable by this thread.
+        if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverLevel, chunkX, chunkZ)) {
+            addTicket.run();
+            return;
+        }
+
+        // Otherwise hand it to the region that owns the chunk.
+        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+                .queueTickTaskQueue(serverLevel, chunkX, chunkZ, addTicket);
     }
 
     public static ChunkHolder getPlayerChunk(ServerLevel nmsWorld, final int chunkX, final int chunkZ) {
@@ -363,7 +420,16 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
         if (lockHolder.chunkLock == null) {
             return;
         }
-        MinecraftServer.getServer().execute(() -> {
+
+        // Folia - region threading.
+        //
+        // Upstream builds and sends the chunk packet from `MinecraftServer.execute(...)`. On Folia
+        // that method throws UnsupportedOperationException outright, and even if it did not, it
+        // dispatches to the global region, which does not own this chunk. Building a chunk packet
+        // reads the chunk and its light data, so it must happen on the region that owns the chunk,
+        // and the packet must be delivered from that region too (connections are not thread-safe and
+        // player state is region-owned).
+        final Runnable sendTask = () -> {
             try {
                 ChunkPos pos = levelChunk.getPos();
                 ClientboundLevelChunkWithLightPacket packet;
@@ -388,7 +454,15 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
             } finally {
                 NMSAdapter.endChunkPacketSend(nmsWorld.getWorld().getName(), pair, lockHolder);
             }
-        });
+        };
+
+        if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(nmsWorld, chunkX, chunkZ)) {
+            // Already on the owning region: send now, avoiding a tick of latency.
+            sendTask.run();
+        } else {
+            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+                    .queueTickTaskQueue(nmsWorld, chunkX, chunkZ, sendTask);
+        }
     }
 
     private static List<ServerPlayer> nearbyPlayers(ServerLevel serverLevel, ChunkPos coordIntPair) {

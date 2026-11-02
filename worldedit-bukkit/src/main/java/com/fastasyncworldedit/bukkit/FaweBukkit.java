@@ -11,6 +11,7 @@ import com.fastasyncworldedit.bukkit.regions.ResidenceFeature;
 import com.fastasyncworldedit.bukkit.regions.TownyFeature;
 import com.fastasyncworldedit.bukkit.regions.WorldGuardFeature;
 import com.fastasyncworldedit.bukkit.util.BukkitTaskManager;
+import com.fastasyncworldedit.bukkit.util.FoliaSupport;
 import com.fastasyncworldedit.bukkit.util.ItemUtil;
 import com.fastasyncworldedit.bukkit.util.PaperSupport;
 import com.fastasyncworldedit.core.FAWEPlatformAdapterImpl;
@@ -257,6 +258,61 @@ public class FaweBukkit implements IFawe, Listener {
     @Override
     public String getPlatform() {
         return "Bukkit";
+    }
+
+    /**
+     * Whether the calling thread is a server tick thread, i.e. may perform world work inline.
+     *
+     * <p>Folia's {@code Bukkit.isPrimaryThread()} is true only on the <em>global</em> region thread,
+     * which owns no ordinary chunks — so it is the wrong question to ask. What we need to know is
+     * whether this thread is any region tick thread, which is precisely Moonrise's
+     * {@code TickThread.isTickThread()}. It is reachable through the server at runtime; the
+     * {@code isGlobalTickThread()} check is used as the fallback when the NMS helper is
+     * unavailable.</p>
+     */
+    @Override
+    public boolean isTickThread() {
+        if (!FoliaSupport.isFolia()) {
+            return Bukkit.isPrimaryThread();
+        }
+        return FoliaSupport.isTickThread();
+    }
+
+    /**
+     * Whether the calling thread owns the region containing the given chunk.
+     *
+     * <p>Folia runs one tick loop per region, each pinned to one thread at a time. World data
+     * (sections, light, block entities, entities) may only be touched by the thread that owns the
+     * region holding it; anything else either throws or silently corrupts state.
+     * {@code Bukkit.isOwnedByCurrentRegion} is Folia's authoritative check. We deliberately go
+     * through the adapters rather than holding a NMS {@code ServerLevel} here, so this stays valid
+     * across world reloads.</p>
+     */
+    @Override
+    public boolean isRegionOwner(com.sk89q.worldedit.world.World world, int chunkX, int chunkZ) {
+        if (!FoliaSupport.isFolia()) {
+            // Single-threaded platform: world access is legal from the one server thread.
+            return Bukkit.isPrimaryThread();
+        }
+        org.bukkit.World bukkitWorld = world == null ? null : com.sk89q.worldedit.bukkit.BukkitAdapter.adapt(world);
+        if (bukkitWorld == null) {
+            return false;
+        }
+        return Bukkit.isOwnedByCurrentRegion(bukkitWorld, chunkX, chunkZ);
+    }
+
+    /**
+     * Whether the calling thread may mutate global (non-region) server state.
+     *
+     * <p>On Folia only the global region thread qualifies, which is exactly what
+     * {@code Bukkit.isGlobalTickThread()} reports. On Paper this is simply the primary thread.</p>
+     */
+    @Override
+    public boolean isGlobalThread() {
+        if (FoliaSupport.isFolia()) {
+            return Bukkit.isGlobalTickThread();
+        }
+        return Bukkit.isPrimaryThread();
     }
 
     @Override

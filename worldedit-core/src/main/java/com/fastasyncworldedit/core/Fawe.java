@@ -207,9 +207,73 @@ public class Fawe {
         }
     }
 
+    /**
+     * Whether the calling thread is a server <em>tick</em> thread, i.e. a thread on which world work
+     * may be performed inline.
+     *
+     * <p>On a single-threaded platform (Paper, Spigot) this is the one and only server thread and
+     * the distinction is trivial. On Folia there is no single server thread: each region ticks on
+     * its own thread, and the global region ticks on another. All of them are tick threads, but each
+     * may only touch the world data of the region it currently owns.</p>
+     *
+     * <p>This predicate answers "is it safe for me to do server work inline at all?" — it does
+     * <b>not</b> answer "do I own this particular chunk?". For the latter use
+     * {@link #isRegionOwner(com.sk89q.worldedit.world.World, int, int)}.</p>
+     */
     public static boolean isMainThread() {
-        return instance == null || instance.thread == Thread.currentThread();
+        final Fawe fawe = instance;
+        if (fawe == null) {
+            return true;
+        }
+        return fawe.implementation.isTickThread();
     }
+
+    /**
+     * Whether the calling thread is the server's <em>global</em> tick thread.
+     *
+     * <p>Global work that is not tied to a region — draining FAWE's global sync queue, touching
+     * plugin-wide state — must run here. On single-threaded platforms this is the same as
+     * {@link #isMainThread()}.</p>
+     */
+    public static boolean isGlobalThread() {
+        final Fawe fawe = instance;
+        if (fawe == null) {
+            return true;
+        }
+        return fawe.implementation.isGlobalThread();
+    }
+
+    /**
+     * The thread captured at startup, retained for diagnostics only.
+     *
+     * @deprecated Use {@link #isMainThread()} / {@link #isRegionOwner} instead; a single thread
+     *         identity is not a meaningful concept on Folia.
+     */
+    @Deprecated(forRemoval = true)
+    public static Thread getInitiatingThread() {
+        return instance == null ? null : instance.thread;
+    }
+
+
+    /**
+     * Whether the calling thread currently owns the region containing the given chunk.
+     *
+     * <p>This is the Folia-correct replacement for {@link #isMainThread()} wherever world data is
+     * touched. On single-threaded platforms it degrades to {@link #isMainThread()}.</p>
+     *
+     * @param world    the world the chunk belongs to
+     * @param chunkX   chunk X coordinate
+     * @param chunkZ   chunk Z coordinate
+     * @return true if the calling thread may safely read/write that chunk right now
+     */
+    public static boolean isRegionOwner(final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ) {
+        final Fawe fawe = instance;
+        if (fawe == null) {
+            return true;
+        }
+        return fawe.implementation.isRegionOwner(world, chunkX, chunkZ);
+    }
+
 
     /**
      * Non-api. Handles an input FAWE exception if not already handled, given the input boolean array.

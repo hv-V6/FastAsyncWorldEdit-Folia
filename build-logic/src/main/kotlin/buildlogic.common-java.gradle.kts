@@ -15,7 +15,13 @@ tasks
         val disabledLint = listOf(
             "processing", "path", "fallthrough", "serial", "overloads", "this-escape",
         )
-        sourceCompatibility = "21"
+        // Folia 26.1.2 is compiled for and distributed as Java 25 bytecode, and its API uses
+        // Java 25 language/library features. Targeting 21 here would make the Folia API
+        // unreachable from our bytecode. Set -PjavaVersion=21 to build the upstream Paper variant.
+        val targetJava: String = (findProperty("javaVersion") as String?) ?: "25"
+        sourceCompatibility = targetJava
+        targetCompatibility = targetJava
+        options.release = targetJava.toInt()
         options.compilerArgs.addAll(listOf("-Xlint:all") + disabledLint.map { "-Xlint:-$it" })
         options.isDeprecation = true
         options.encoding = "UTF-8"

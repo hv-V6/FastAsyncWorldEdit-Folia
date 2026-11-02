@@ -108,8 +108,15 @@ public abstract class QueueHandler implements Trimable, Runnable {
 
     @Override
     public void run() {
-        if (!Fawe.isMainThread()) {
-            throw new IllegalStateException("Not main thread");
+        // This repeating task drains the global sync queues. It is scheduled on the server's global
+        // tick thread. On Folia that thread is NOT `Fawe.isMainThread()` in the old sense, so the
+        // correct guard is "am I the global tick thread?".
+        //
+        // NOTE: on Folia this loop must only ever drain work that is genuinely global. Chunk work is
+        // routed to the owning region instead (see TaskManager#regionTask), because a region's world
+        // data may not be touched from the global thread.
+        if (!Fawe.isGlobalThread()) {
+            throw new IllegalStateException("Not global thread");
         }
         if (!syncTasks.isEmpty()) {
             long currentAllocate = getAllocate();

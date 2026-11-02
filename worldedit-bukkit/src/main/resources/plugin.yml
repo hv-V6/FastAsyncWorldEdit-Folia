@@ -3,6 +3,11 @@ main: com.sk89q.worldedit.bukkit.WorldEditPlugin
 version: "${internalVersion}"
 load: STARTUP
 api-version: 1.21
+# Declares that this build understands Folia's regionised threading model. Paper/Spigot ignore this
+# flag; Folia refuses to load plugins that omit it, and only once it is set does Folia hand the
+# plugin the region-aware schedulers (RegionScheduler, GlobalRegionScheduler, AsyncScheduler) that
+# this fork depends on instead of the global BukkitScheduler.
+folia-supported: true
 softdepend: [ Vault ]
 provides: [ WorldEdit ]
 website: https://modrinth.com/plugin/fastasyncworldedit/

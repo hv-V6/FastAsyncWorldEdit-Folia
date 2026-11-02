@@ -546,21 +546,31 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
 
     @Override
     protected void preCaptureStates(final ServerLevel serverLevel) {
-        serverLevel.captureTreeGeneration = true;
-        serverLevel.captureBlockStates = true;
+        // Folia - region threading: capture state is per-REGION, not per-level. Folia replaced the
+        // global ServerLevel capture flags with RegionizedWorldData, held per ticking region.
+        // Callers must be on the region that owns the chunks being written; otherwise the capture
+        // flags would be set on another region's data and blocks written by the target region would
+        // not be recorded for the block-state list.
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = serverLevel.getCurrentWorldData();
+        worldData.captureTreeGeneration = true;
+        worldData.captureBlockStates = true;
     }
 
     @Override
     protected List<org.bukkit.block.BlockState> getCapturedBlockStatesCopy(final ServerLevel serverLevel) {
-        return new ArrayList<>(serverLevel.capturedBlockStates.values());
+        // Folia - region threading: read the current region's capture map.
+        return new ArrayList<>(serverLevel.getCurrentWorldData().capturedBlockStates.values());
     }
 
     @Override
     protected void postCaptureBlockStates(final ServerLevel serverLevel) {
-        serverLevel.captureBlockStates = false;
-        serverLevel.captureTreeGeneration = false;
-        serverLevel.capturedBlockStates.clear();
+        // Folia - region threading: reset and drain the current region's capture state.
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = serverLevel.getCurrentWorldData();
+        worldData.captureBlockStates = false;
+        worldData.captureTreeGeneration = false;
+        worldData.capturedBlockStates.clear();
     }
+
     @Override
     public boolean generateFeature(ConfiguredFeatureType feature, World world, EditSession editSession, BlockVector3 pt) {
         ServerLevel serverLevel = getServerLevel(world);
@@ -584,7 +594,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
                     return null;
                 }
                 List<CraftBlockState> placedBlocks = new ArrayList<>(populator.getSnapshotBlocks());
-                placedBlocks.addAll(serverLevel.capturedBlockStates.values());
+                placedBlocks.addAll(serverLevel.getCurrentWorldData().capturedBlockStates.values()); // Folia - region threading
                 return placedBlocks;
             } finally {
                 postCaptureBlockStates(serverLevel);
@@ -652,7 +662,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
                             ), chunkPosx
                     ));
                     List<CraftBlockState> placedBlocks = new ArrayList<>(populator.getSnapshotBlocks());
-                    placedBlocks.addAll(serverLevel.capturedBlockStates.values());
+                    placedBlocks.addAll(serverLevel.getCurrentWorldData().capturedBlockStates.values()); // Folia - region threading
                     return placedBlocks;
                 }
             } finally {
@@ -691,7 +701,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
                     return null;
                 }
                 List<CraftBlockState> placedBlocks = new ArrayList<>(populator.getSnapshotBlocks());
-                placedBlocks.addAll(serverLevel.capturedBlockStates.values());
+                placedBlocks.addAll(serverLevel.getCurrentWorldData().capturedBlockStates.values()); // Folia - region threading
                 return placedBlocks;
             } finally {
                 postCaptureBlockStates(serverLevel);

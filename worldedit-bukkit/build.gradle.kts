@@ -96,7 +96,11 @@ dependencies {
     api(project(":worldedit-core"))
     api(project(":worldedit-libs:bukkit"))
 
-    localImplementation(libs.paperApi) {
+    // This fork targets Folia only, so the Bukkit surface is `dev.folia:folia-api`. It is a superset
+    // of paper-api: the whole Bukkit API plus RegionScheduler / GlobalRegionScheduler /
+    // AsyncScheduler / EntityScheduler and the region-ownership helpers. Compiling against paper-api
+    // would hide every Folia threading primitive this port relies on.
+    localImplementation(libs.foliaApi) {
         exclude("junit", "junit")
         exclude(group = "org.slf4j", module = "slf4j-api")
     }
@@ -206,12 +210,17 @@ tasks.register<ShadowJar>("reobfShadowJar") {
 }
 
 tasks.named<ShadowJar>("shadowJar") {
-    archiveFileName.set("${rootProject.name}-Paper-${project.version}.${archiveExtension.getOrElse("jar")}")
+    // This is a Folia fork, so the artifact is named for Folia rather than Paper. The JAR is
+    // Mojang-mapped (Folia ships Mojang-mapped server classes) and is not usable on Paper/Spigot:
+    // the adapters are compiled against Folia's development bundle and call Folia-only APIs
+    // (RegionScheduler, RegionizedTaskQueue, TickThread, RegionizedWorldData).
+    archiveFileName.set("${rootProject.name}-Folia-${project.version}.${archiveExtension.getOrElse("jar")}")
     configurations.addAll(adaptersMojmap, adaptersGlobalMojmap)
     manifest {
         attributes(
             "paperweight-mappings-namespace" to "mojang",
-            "FAWE-Plugin-Jar-Type" to "mojang"
+            "FAWE-Plugin-Jar-Type" to "mojang",
+            "FAWE-Fork" to "Folia"
         )
     }
 }

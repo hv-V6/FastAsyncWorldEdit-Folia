@@ -55,9 +55,15 @@ includeBuild("build-logic")
 
 include("worldedit-libs")
 
-listOf("1_21", "1_21_4", "1_21_5", "1_21_6", "1_21_9", "1_21_11", "26.1", "26.2", "26.3").forEach {
-    include("worldedit-bukkit:adapters:adapter-$it")
-}
+/*
+ * This fork targets Folia stable 26.1.2 exclusively, so only the matching adapter module is built.
+ *
+ * Upstream FAWE ships one adapter per supported Minecraft version. On Folia those older adapters are
+ * not merely unnecessary but actively wrong: Folia's server internals (regioniser, Moonrise chunk
+ * system, region ownership checks) differ from Paper's, so NMS code written against a Paper 1.21.x
+ * bundle would not be region-safe even if it compiled. Restricting the matrix keeps the build honest.
+ */
+include("worldedit-bukkit:adapters:adapter-26.1")
 
 listOf("bukkit", "core", "cli").forEach {
     include("worldedit-libs:$it")

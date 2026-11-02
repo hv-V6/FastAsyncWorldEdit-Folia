@@ -255,7 +255,21 @@ public class SingleThreadQueueExtent extends ExtentBatchProcessorHolder implemen
 
         chunk.invalidateWrapper();
 
-        if (Fawe.isMainThread()) {
+        // Whether the chunk can be applied inline on the calling thread.
+        //
+        // Single-threaded platforms: yes iff we are the server thread.
+        //
+        // Folia: only if this thread owns the region containing this chunk. The crucial point is
+        // that we must NOT submit this chunk to the shared blocking executor just because we are
+        // not the "main" thread — on Folia the calling thread may be the region owner, and the
+        // chunk MUST be applied here, because:
+        //   * applying it elsewhere is a cross-region write (illegal), and
+        //   * if a region thread blocks in flush() waiting for work that only it can legally do,
+        //     the region deadlocks and Folia's watchdog kills the tick.
+        //
+        // So we test region ownership for this specific chunk rather than the old global thread
+        // check. `isRegionOwner` degrades to `isMainThread()` on non-Folia platforms.
+        if (Fawe.isRegionOwner(world, chunk.getX(), chunk.getZ())) {
             V result = (V) chunk.call();
             if (result == null) {
                 return (V) (Future) Futures.immediateFuture(null);

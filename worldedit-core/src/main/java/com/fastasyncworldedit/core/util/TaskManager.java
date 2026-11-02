@@ -247,6 +247,135 @@ public abstract class TaskManager {
      */
     public abstract void cancel(final int task);
 
+    // ---------------------------------------------------------------------------------------------
+    // Region-aware task submission.
+    //
+    // On a single-threaded platform all of these collapse to the existing global behaviour. On Folia
+    // (where the world is split into independently ticking regions, each owned by one thread) these
+    // are the only correct way to touch world state: the work must execute on the thread that owns
+    // the region containing the target chunk.
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Whether the calling thread may currently read or write the region containing the given chunk.
+     *
+     * @param world  target world
+     * @param chunkX chunk X coordinate
+     * @param chunkZ chunk Z coordinate
+     * @return true if the calling thread owns that region
+     */
+    public boolean isRegionOwner(@Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ) {
+        return Fawe.isMainThread();
+    }
+
+    /**
+     * Run a task on the thread that owns the region containing the given chunk.
+     *
+     * <p>If the caller already owns that region the task runs inline; otherwise it is queued to the
+     * region and this method returns without waiting.</p>
+     *
+     * @param world    target world
+     * @param chunkX   chunk X coordinate
+     * @param chunkZ   chunk Z coordinate
+     * @param runnable task to run
+     */
+    public void regionTask(@Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ,
+                           @Nonnull final Runnable runnable) {
+        task(runnable);
+    }
+
+    /**
+     * Run a task on the thread that owns the region containing the given chunk, after a delay.
+     *
+     * @param world    target world
+     * @param chunkX   chunk X coordinate
+     * @param chunkZ   chunk Z coordinate
+     * @param runnable task to run
+     * @param delay    delay in ticks, must be positive
+     */
+    public void regionLater(@Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ,
+                            @Nonnull final Runnable runnable, final int delay) {
+        later(runnable, delay);
+    }
+
+    /**
+     * Run a task on the thread that owns the region containing the given chunk and block on it,
+     * returning its result.
+     *
+     * <p>This is the region-correct replacement for {@link #sync(Supplier)} where the work touches a
+     * specific chunk. If the caller already owns the region, the supplier runs inline.</p>
+     *
+     * <p><b>Deadlock hazard on Folia:</b> blocking on work targeted at a <em>different</em> region
+     * while holding a region thread can deadlock, because the target region may need this thread to
+     * make progress. Prefer {@link #regionFuture} plus a continuation where possible.</p>
+     *
+     * @param world    target world
+     * @param chunkX   chunk X coordinate
+     * @param chunkZ   chunk Z coordinate
+     * @param supplier work producing the result
+     * @param <T>      result type
+     * @return the supplier's result
+     */
+    public <T> T regionSync(@Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ,
+                            @Nonnull final Supplier<T> supplier) {
+        return sync(supplier);
+    }
+
+    /**
+     * Submit a task to the thread that owns the region containing the given chunk and return a
+     * future completed when it has run there.
+     *
+     * @param world    target world
+     * @param chunkX   chunk X coordinate
+     * @param chunkZ   chunk Z coordinate
+     * @param runnable task to run
+     * @return future completed once the task has run on the owning region
+     */
+    public java.util.concurrent.CompletableFuture<Void> regionFuture(
+            @Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ,
+            @Nonnull final Runnable runnable) {
+        final java.util.concurrent.CompletableFuture<Void> future = new java.util.concurrent.CompletableFuture<>();
+        regionTask(world, chunkX, chunkZ, () -> {
+            try {
+                runnable.run();
+                future.complete(null);
+            } catch (final Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
+        return future;
+    }
+
+    /**
+     * Get the current tick for the region containing the given chunk.
+     *
+     * <p>On single-threaded platforms this is the global tick. On Folia each region keeps its own
+     * counter, so a single global value would be wrong for throttling per-region work.</p>
+     *
+     * @param world  target world, may be null for the global tick
+     * @param chunkX chunk X coordinate
+     * @param chunkZ chunk Z coordinate
+     * @return the current tick for that region
+     */
+    public long regionTick(@Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ) {
+        return Fawe.instance().getTimer().getTick();
+    }
+
+    /**
+     * Get the TPS of the region containing the given chunk, used to throttle per-region work.
+     *
+     * <p>On single-threaded platforms this is the server-wide TPS.</p>
+     *
+     * @param world  target world, may be null for the global TPS
+     * @param chunkX chunk X coordinate
+     * @param chunkZ chunk Z coordinate
+     * @return the region's current TPS
+     */
+    public double regionTps(@Nullable final com.sk89q.worldedit.world.World world, final int chunkX, final int chunkZ) {
+        return Fawe.instance().getTimer().getTPS();
+    }
+
+
     /**
      * Break up a task and run it in fragments of 5ms.<br>
      * - Each task will run on the main thread.<br>

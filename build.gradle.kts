@@ -10,7 +10,11 @@ plugins {
     id("xyz.jpenilla.run-paper") version "3.1.0"
 }
 
-val rootVersion: String = (extra.properties["rootVersion"] as? String) ?: "2.16.3"
+// This tree is a Folia fork of FastAsyncWorldEdit. The base version tracks the upstream release we
+// forked from, with a `-folia` qualifier so the artifact cannot be confused with an upstream build.
+// The targeted Folia release lives in gradle.properties (foliaVersion).
+val upstreamVersion: String = (extra.properties["rootVersion"] as? String) ?: "2.16.3"
+val rootVersion: String = "$upstreamVersion-folia"
 val snapshot: String = (extra.properties["snapshot"] as? String) ?: "SNAPSHOT"
 var revision: String = (extra.properties["revision"] as? String) ?: ""
 var buildNumber: String = (extra.properties["buildNumber"] as? String) ?: ""

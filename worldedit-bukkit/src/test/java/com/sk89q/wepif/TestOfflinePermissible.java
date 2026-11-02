@@ -251,6 +251,12 @@ public class TestOfflinePermissible implements OfflinePlayer, Permissible {
         return null;
     }
 
+    // Required by OfflinePlayer as of the Folia 26.1.2 API surface.
+    @Override
+    public @Nullable Location getRespawnLocation(boolean loadFromDisk) {
+        return null;
+    }
+
     @Override
     public void incrementStatistic(@Nonnull Statistic statistic) throws IllegalArgumentException {
 

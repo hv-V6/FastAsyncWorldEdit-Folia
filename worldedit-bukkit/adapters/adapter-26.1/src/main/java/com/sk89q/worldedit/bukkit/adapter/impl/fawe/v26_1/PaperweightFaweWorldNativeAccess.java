@@ -62,8 +62,25 @@ public class PaperweightFaweWorldNativeAccess implements WorldNativeAccess<Level
         this.level = level;
         // Use the actual tick as minecraft-defined so we don't try to force blocks into the world when the server's already lagging.
         //  - With the caveat that we don't want to have too many cached changed (1024) so we'd flush those at 1024 anyway.
-        this.lastTick = new AtomicInteger(MinecraftServer.currentTick);
+        this.lastTick = new AtomicInteger(currentTick());
     }
+
+    /**
+     * Folia - region threading: there is no global {@code MinecraftServer.currentTick} on Folia.
+     * Each ticking region maintains its own tick counter, reachable through the regionised world
+     * data for the level. Off-region (e.g. from an async FAWE worker) that data is absent, so fall
+     * back to 0; callers only use this to detect that a tick has elapsed between two writes, and a
+     * constant value simply means "do not force a flush on tick boundaries", which is the safe
+     * behaviour when we are not on a region thread.
+     */
+    private int currentTick() {
+        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = getLevel().getCurrentWorldData();
+        if (worldData == null || worldData.regionData == null) {
+            return 0;
+        }
+        return (int) worldData.regionData.getCurrentTick();
+    }
+
 
     private Level getLevel() {
         return Objects.requireNonNull(level.get(), "The reference to the world was lost");
@@ -98,7 +115,7 @@ public class PaperweightFaweWorldNativeAccess implements WorldNativeAccess<Level
             LevelChunk levelChunk, BlockPos blockPos,
             net.minecraft.world.level.block.state.BlockState blockState
     ) {
-        int currentTick = MinecraftServer.currentTick;
+        int currentTick = currentTick();
         if (Fawe.isMainThread()) {
             return levelChunk.setBlockState(blockPos, blockState,
                     this.sideEffectSet.shouldApply(SideEffect.UPDATE) ? 0 : 512
