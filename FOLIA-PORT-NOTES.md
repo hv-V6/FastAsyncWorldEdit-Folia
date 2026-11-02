@@ -244,16 +244,67 @@ PASS multi-region:   7/7 sampled chunks applied (write took 5791ms)  (~24x24 chu
 
 Zero ERROR lines, zero watchdog tick kills.
 
+### Concurrency: two multi-region edits at once
+
+Testing concurrent edits exposed a second, independent deadlock, in FAWE's own chunk-GET cache:
+
+```java
+// PaperweightGetBlocks#getChunk(), before the fix
+synchronized (this) {
+    if (levelChunk == null) {
+        levelChunk = ensureLoaded(serverLevel).get();   // blocks inside the monitor
+    }
+}
+```
+
+The load is performed while holding the object's monitor. On Folia: one edit's worker blocks in
+`get()` waiting for a chunk load that only the owning region can finish, while that region's thread
+calls `trim()` (reachable via `ChunkHolder.getOrCreateGet` → `hasSection`/`getSections` → `getChunk`)
+and blocks on the same monitor. Neither side progresses; the watchdog kills the region — observed as
+a region thread in state `BLOCKED` inside `PaperweightGetBlocks.trim`.
+
+Fixed by loading outside the monitor and publishing under it, keeping whichever instance won.
+
+### IMPORTANT correction: a synchronous load is never safe on a tick thread
+
+Earlier I recorded that a region thread could safely load its *own* region's chunks. **That is
+wrong.** Folia's `ServerChunkCache.syncLoad` submits the load to Moonrise's `ChunkTaskScheduler` and
+then waits via `BlockableEventLoop.managedBlock`; the wait itself is the problem, not ownership. A
+region thread that waits can stall until the watchdog fires.
+
+I tried guarding this by throwing from `ensureCanLoadChunk` whenever a tick thread attempted a load.
+That was **too broad and broke working paths** — `basic`, `copy-paste` and `distant-region` all began
+failing, because those edits legitimately reach this code with chunks already loaded. It was reverted.
+
+The correct position, still open: FAWE should *route* a would-be cross-region edit to the async path
+up front (a design change), not reject it at the load site (a runtime guard). The `trim()` fix above
+removes the deadlock that made this urgent.
+
+### Verified at runtime (Folia 26.1.2-DEV-HEAD@62dc0f2, Java 25)
+
+Harness plugin schedules each scenario on the region owning its chunks; multi-region cases are driven
+from the async scheduler.
+
+```
+PASS basic:                  single=STONE bulk=GOLD_BLOCK
+PASS copy-paste:             src=EMERALD_BLOCK dst=EMERALD_BLOCK dstCorner=EMERALD_BLOCK
+PASS distant-region:         type=REDSTONE_BLOCK ownedByThisThread=true   (chunk 320,320)
+PASS multi-region:           7/7 sampled chunks applied (write took 8791ms)
+PASS concurrent multi-region: applied=2/2 failures=0 in 13602ms   (two 20x20-chunk edits at once)
+```
+
+Zero ERROR lines, zero watchdog tick kills.
+
 ### Still to verify
 - `//undo` / `//redo` through a real player actor (needs a connected client; history is recorded, replay path unproven).
 - Brushes, `//schem load/save`, `//regen`, `//paste -a`.
-- Concurrent edits in two regions at once under load.
 - Graceful degradation of WorldGuard / PlotSquared / Towny / GriefPrevention (none support Folia).
 
 ### Known remaining risk
-- Region-thread bulk edits that must load foreign chunks will stall the region. FAWE should detect
-  this and route the whole edit through the async path rather than discovering it at `syncLoad`.
+- A tick-thread bulk edit that needs foreign chunks will still stall the region (see the correction
+  above). The fix is architectural: route such edits through the async path before starting.
 - `//regen` will need the same off-tick treatment.
+
 
 
 ## 7. Historical analysis (pre-port)
