@@ -325,6 +325,11 @@ public abstract class TaskManager {
      * Submit a task to the thread that owns the region containing the given chunk and return a
      * future completed when it has run there.
      *
+     * <p>Unlike {@link #regionTask}, this always returns a <em>pending</em> future rather than
+     * running the task inline, so callers can safely collect a set of futures and join them. That
+     * matters for multi-region edits: each chunk partition is submitted here and the caller joins
+     * them once every owning region has applied its share.</p>
+     *
      * @param world    target world
      * @param chunkX   chunk X coordinate
      * @param chunkZ   chunk Z coordinate

@@ -278,7 +278,10 @@ public class SingleThreadQueueExtent extends ExtentBatchProcessorHolder implemen
             }
         }
 
-        return (V) Fawe.instance().getQueueHandler().submit(chunk);
+        // Not our region: hand the chunk to the region that owns it. This is the partitioning step
+        // that makes an edit spanning several Folia regions correct — each chunk is applied by the
+        // only thread permitted to touch it, rather than being written off-region by a shared pool.
+        return (V) Fawe.instance().getQueueHandler().submit(chunk, world);
     }
 
     @Override
@@ -517,7 +520,80 @@ public class SingleThreadQueueExtent extends ExtentBatchProcessorHolder implemen
             }
             getChunkLock.unlock();
         }
+        awaitSubmissions();
+    }
+
+    /**
+     * Wait for chunks that were dispatched to <em>other</em> regions to be applied.
+     *
+     * <p>This is where a multi-region edit is joined, and the join policy is the subtle part.</p>
+     *
+     * <ul>
+     *     <li><b>Not a tick thread</b> (e.g. a plugin's async worker): block until every partition
+     *     completes. There is no server tick to stall, so parking is safe and the caller gets the
+     *     usual synchronous "edit finished" guarantee.</li>
+     *     <li><b>On a tick thread</b> (any Folia region thread, or the single Paper thread): do not
+     *     block on other regions. The chunks this thread owns were already applied inline by
+     *     {@link #submitUnchecked}, so everything still outstanding belongs to a region this thread
+     *     does not own. Parking here would stall the region tick — Folia's watchdog kills regions
+     *     that stall, and the target region may itself be waiting on this one — so the remaining
+     *     partitions stay queued and are applied on their owning regions' next ticks.</li>
+     * </ul>
+     *
+     * <p>Note that {@link Fawe#isMainThread()} is, on Folia, "is this a server tick thread?" (see
+     * {@code Fawe.isMainThread()}), which is exactly the predicate wanted here: no tick thread may
+     * park on foreign region work, regardless of which region it owns.</p>
+     *
+     * <p>Consequence: for an edit spanning several regions, a region-thread caller returns once its
+     * own partition is applied, with the remainder committed asynchronously. Block placement itself
+     * is still correct and ordered per chunk; only the "all chunks are on disk" completion point
+     * moves later.</p>
+     */
+    private void awaitSubmissions() {
+        if (Fawe.isMainThread()) {
+            // On a tick thread: drain whatever is already complete, but never park waiting.
+            pollCompletedSubmissions();
+            return;
+        }
+        // Off-tick thread: safe to block until every dispatched partition has been applied.
         pollSubmissions(0, true);
+    }
+
+    /**
+     * Drop submissions that have already completed, without blocking.
+     *
+     * <p>Used when running on a tick thread, where waiting on another region's work is not permitted.
+     * Completed futures are inspected so failures still reach the log; anything still in flight stays
+     * queued and is applied by its owning region on a later tick.</p>
+     */
+    private void pollCompletedSubmissions() {
+        final java.util.Iterator<Future<?>> iterator = submissions.iterator();
+        while (iterator.hasNext()) {
+            final Future<?> future = iterator.next();
+            if (future == null) {
+                iterator.remove();
+                continue;
+            }
+            if (!future.isDone()) {
+                continue;
+            }
+            try {
+                future.get();
+            } catch (final FaweException e) {
+                Fawe.handleFaweException(faweExceptionReasonsUsed, e, LOGGER);
+            } catch (final ExecutionException e) {
+                if (e.getCause() instanceof FaweException fe) {
+                    Fawe.handleFaweException(faweExceptionReasonsUsed, fe, LOGGER);
+                } else {
+                    LOGGER.catching(e);
+                }
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } finally {
+                iterator.remove();
+            }
+        }
     }
 
     @Override

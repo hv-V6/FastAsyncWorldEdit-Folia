@@ -10,7 +10,7 @@ and `_folia/stable/folia-server/build/libs/folia-server-26.1.2.local-SNAPSHOT.ja
 
 | Fact | Evidence |
 |---|---|
-| No single main thread. `Bukkit.isPrimaryThread()` is only true on the global-region thread. | `Server.isPrimaryThread()` |
+| `Bukkit.isPrimaryThread()` on Folia means "is this **any** region tick thread?" — **not** "is this the one server thread". Verified by decompiling `CraftServer`: it is literally `return TickThread.isTickThread();`. | `javap -c CraftServer` |
 | `Bukkit.getScheduler()` **exists** but `CraftScheduler` throws `UnsupportedOperationException("...")` for `runTask*`/`schedule*` variants. Only async variants partially work. | `javap -c CraftScheduler` |
 | Schedulers available: `RegionScheduler`, `GlobalRegionScheduler`, `AsyncScheduler`, `EntityScheduler`. | `Server.getRegionScheduler()` etc. |
 | `org.spigotmc.AsyncCatcher` has **no `enabled` field** in Folia — only `catchOp(String)`, which hard-fails via `TickThread.isTickThread()`. | `javap org.spigotmc.AsyncCatcher` |

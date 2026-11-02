@@ -50,51 +50,30 @@ public final class FoliaSupport {
     }
 
     /**
-     * Whether the calling thread is one of Folia's region tick threads.
+     * Whether the calling thread is one of Folia's tick threads.
      *
-     * <p>{@code Bukkit.isPrimaryThread()} is <b>not</b> the right question on Folia: it reports true
-     * only for the global region thread, which owns no ordinary chunks. World work is legal from any
-     * region tick thread, subject to owning the relevant region. Moonrise's
-     * {@code TickThread.isTickThread()} answers the general question, but it lives in the server
-     * (NMS) classes that this module does not compile against, so it is resolved reflectively and
-     * cached once.</p>
+     * <p>{@code Bukkit.isPrimaryThread()} looks like the wrong question on Folia — there is no single
+     * primary thread — but it is in fact exactly right. Verified by decompiling Folia 26.1.2's
+     * {@code CraftServer}:</p>
      *
-     * @return true if the calling thread is a region tick thread
+     * <pre>
+     *   public boolean isPrimaryThread() {
+     *       return TickThread.isTickThread();   // Moonrise
+     *   }
+     * </pre>
+     *
+     * <p>So on Folia it means "am I any region tick thread?", not "am I the one server thread". That
+     * is the predicate FAWE needs in order to decide whether it may do server work inline. An
+     * earlier attempt resolved {@code TickThread.isTickThread()} reflectively and silently failed,
+     * falling back to {@code isGlobalTickThread()} (false on ordinary regions) — which made every
+     * region thread look off-thread and caused bulk edits to fan out to FAWE's own pool and deadlock
+     * the region. Going through the public Bukkit API avoids that class-loading hazard entirely.</p>
+     *
+     * @return true if the calling thread is a region (or global) tick thread
      */
     public static boolean isTickThread() {
-        if (!FOLIA) {
-            return org.bukkit.Bukkit.isPrimaryThread();
-        }
-        if (TICK_THREAD_CHECK != null) {
-            try {
-                return (Boolean) TICK_THREAD_CHECK.invokeExact();
-            } catch (final Throwable ignored) {
-                // Fall through to the conservative answer below.
-            }
-        }
-        // Conservative fallback: treat the global tick thread as a tick thread. Region threads
-        // cannot use this path when the NMS helper is missing, so callers get a safe "no" rather
-        // than a false positive that would let them touch the world off-region.
-        return org.bukkit.Bukkit.isGlobalTickThread();
-    }
-
-    /**
-     * {@code ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()} resolved reflectively.
-     * Null when unavailable (non-Folia, or an unexpected server layout).
-     */
-    private static final java.lang.invoke.MethodHandle TICK_THREAD_CHECK = resolveTickThreadCheck();
-
-    private static java.lang.invoke.MethodHandle resolveTickThreadCheck() {
-        if (!FOLIA) {
-            return null;
-        }
-        try {
-            final Class<?> tickThread = Class.forName("ca.spottedleaf.moonrise.common.util.TickThread");
-            return java.lang.invoke.MethodHandles.publicLookup()
-                    .findStatic(tickThread, "isTickThread", java.lang.invoke.MethodType.methodType(boolean.class));
-        } catch (final Throwable ignored) {
-            return null;
-        }
+        // On Paper/Spigot this is the single server thread, which is the same concept.
+        return org.bukkit.Bukkit.isPrimaryThread();
     }
 
 }

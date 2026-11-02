@@ -404,14 +404,55 @@ public abstract class QueueHandler implements Trimable, Runnable {
      * executor, the main "work-horse" queue for FAWE. Handles chunk submission (and chunk submission alone). Blocking in order
      * to forcibly prevent overworking/over-submission of chunk process tasks.
      *
-     * @param chunk chunk
-     * @param <T>
-     * @return Future representing task
+     * <p><b>Region-partitioned submission.</b> A single WorldEdit operation frequently spans many
+     * chunks, and on Folia those chunks may be split across several independently ticking regions.
+     * Chunk data belongs to exactly one region, and only the thread that owns that region may write
+     * it. This method therefore dispatches each chunk to its <em>owning region</em> rather than to
+     * FAWE's blocking pool:</p>
+     *
+     * <ul>
+     *     <li>Chunks whose region the caller already owns are applied inline by the caller
+     *     (see {@link com.fastasyncworldedit.core.queue.implementation.SingleThreadQueueExtent}).</li>
+     *     <li>Every other chunk is queued to the region that owns it, via
+     *     {@link com.fastasyncworldedit.core.util.TaskManager#regionFuture}.</li>
+     * </ul>
+     *
+     * <p>This is what makes a multi-region edit correct: the edit is partitioned by owning region,
+     * each partition runs on the only thread allowed to perform it, and the returned futures can be
+     * joined once all partitions complete.</p>
+     *
+     * <p>On single-threaded platforms {@code regionFuture} collapses to the ordinary main-thread
+     * task queue, preserving upstream behaviour.</p>
+     *
+     * @param chunk chunk to apply
+     * @param world world the chunk belongs to, used to resolve the owning region
+     * @param <T>   future type
+     * @return future completed once the chunk has been applied on its owning region
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends Future<T>> T submit(IQueueChunk<T> chunk, com.sk89q.worldedit.world.World world) {
+        final int chunkX = chunk.getX();
+        final int chunkZ = chunk.getZ();
+        // CompletableFuture is a Future, but not a Future<T>: the chunk's own future type parameter
+        // is only ever its own Future. Callers (SingleThreadQueueExtent) already erase this with an
+        // unchecked cast, so match that here rather than inventing a different contract.
+        final Future<?> partitioned = com.fastasyncworldedit.core.util.TaskManager.taskManager()
+                .regionFuture(world, chunkX, chunkZ, chunk::call);
+        return (T) partitioned;
+    }
+
+    /**
+     * Submit a chunk without region information.
+     *
+     * <p>Kept for compatibility with code paths that have no world context. On Folia prefer
+     * {@link #submit(IQueueChunk, com.sk89q.worldedit.world.World)}, because a chunk applied from a
+     * thread that does not own its region is a cross-region write.</p>
+     *
+     * @param chunk chunk to apply
+     * @param <T>   future type
+     * @return future representing the task
      */
     public <T extends Future<T>> T submit(IQueueChunk<T> chunk) {
-//        if (MemUtil.isMemoryFree()) { TODO NOT IMPLEMENTED - optimize this
-//            return (T) forkJoinPoolSecondary.submit(chunk);
-//        }
         return (T) blockingExecutor.submit(chunk);
     }
 

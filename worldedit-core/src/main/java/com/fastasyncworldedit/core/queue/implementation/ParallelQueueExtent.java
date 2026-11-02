@@ -1,5 +1,6 @@
 package com.fastasyncworldedit.core.queue.implementation;
 
+import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.FaweCache;
 import com.fastasyncworldedit.core.configuration.Settings;
 import com.fastasyncworldedit.core.extent.NullExtent;
@@ -141,9 +142,27 @@ public class ParallelQueueExtent extends PassthroughExtent {
         final Set<BlockVector2> chunks = region.getChunks();
         final Iterator<BlockVector2> chunksIter = chunks.iterator();
 
+        // Folia - region threading.
+        //
+        // Upstream fans the region out over FAWE's own ForkJoinPool and joins the task. That is
+        // wrong on Folia in two independent ways:
+        //
+        //   1. The pool's worker threads do not own the regions holding those chunks, so applying
+        //      them there is a cross-region write.
+        //   2. The join parks the calling thread. When the caller is a region thread, that stalls
+        //      the region tick and Folia's watchdog kills it.
+        //
+        // It is also unnecessary. On Folia the parallelism that matters is *between* regions, not
+        // within one: each region ticks on its own thread concurrently anyway. So we take the
+        // sequential path here and let the queue route each chunk to the region that owns it
+        // (see SingleThreadQueueExtent#submitUnchecked and QueueHandler#submit). Chunks belonging to
+        // the calling region are applied inline; the rest are dispatched to their owning regions and
+        // applied there. That partitions a multi-region edit correctly rather than deadlocking.
+        final boolean regionThread = Fawe.isMainThread();
+
         // Get a pool, to operate on the chunks in parallel
         final int size = Math.min(chunks.size(), Settings.settings().QUEUE.PARALLEL_THREADS);
-        if (size <= 1) {
+        if (size <= 1 || regionThread) {
             // if PQE is ever used with PARALLEL_THREADS = 1, or only one chunk is edited, just run sequentially
             ChunkFilterBlock block = null;
             while (chunksIter.hasNext()) {
