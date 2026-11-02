@@ -909,20 +909,36 @@ public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, L
     public LevelChunk getChunk() {
         LevelChunk levelChunk = this.levelChunk;
         if (levelChunk == null) {
+            // Do the load OUTSIDE the monitor.
+            //
+            // The previous code held `synchronized (this)` across `ensureLoaded(...).get()`, i.e. it
+            // blocked while holding this object's monitor. On Folia that is a deadlock: the load is
+            // completed by the region thread that owns the chunk, and that same region thread may
+            // need this monitor (trim() takes it, and hasSection/getSections reach getChunk()). The
+            // region thread then sits BLOCKED on the monitor while the loader waits on the region,
+            // and Folia's watchdog kills the region.
+            //
+            // Loading first and only then publishing under the lock keeps the fast path lazy while
+            // guaranteeing we never wait on a chunk load while holding a lock another region thread
+            // might need.
+            final LevelChunk loaded;
+            try {
+                loaded = ensureLoaded(this.serverLevel).get();
+            } catch (InterruptedException | ExecutionException e) {
+                LOGGER.error("Could not get chunk at {},{}", chunkX, chunkZ, e);
+                throw new FaweException(
+                        TextComponent.of("Could not get chunk at " + chunkX + "," + chunkZ + ": " + e.getMessage()),
+                        FaweException.Type.OTHER,
+                        false
+                );
+            }
             synchronized (this) {
-                levelChunk = this.levelChunk;
-                if (levelChunk == null) {
-                    try {
-                        this.levelChunk = levelChunk = ensureLoaded(this.serverLevel).get();
-                    } catch (InterruptedException | ExecutionException e) {
-                        LOGGER.error("Could not get chunk at {},{}", chunkX, chunkZ, e);
-                        throw new FaweException(
-                                TextComponent.of("Could not get chunk at " + chunkX + "," + chunkZ + ": " + e.getMessage()),
-                                FaweException.Type.OTHER,
-                                false
-                        );
-                    }
+                // Another thread may have loaded it concurrently; keep whichever won so callers see
+                // a single stable instance.
+                if (this.levelChunk == null) {
+                    this.levelChunk = loaded;
                 }
+                levelChunk = this.levelChunk;
             }
         }
         return levelChunk;
